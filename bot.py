@@ -20,30 +20,44 @@ BTN_ENTRAR = '🔑 Entrar a Sala'
 BTN_SALIR = '🚪 Salir de la Sala'
 BTN_MONITOR = '🕵️ Monitor: ON/OFF'
 
+# Función auxiliar para borrar mensajes con seguridad
+async def delete_msg(context, chat_id, message_id, delay=0):
+    if delay > 0:
+        await asyncio.sleep(delay)
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except:
+        pass
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    # Borrar el comando /start del usuario
+    asyncio.create_task(delete_msg(context, user_id, update.message.message_id))
+    
     keyboard = [[BTN_ENTRAR]]
     if user_id == ADMIN_ID:
         keyboard.append([BTN_MONITOR])
     
-    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-    await update.message.reply_text("🔐 **Pasarela Pro**\nPulse un botón para comenzar.", reply_markup=reply_markup)
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
+    await update.message.reply_text("🔐 **Pasarela Pro**", reply_markup=reply_markup)
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.chat_id
     text = update.message.text
 
-    # BOTÓN MONITOR
+    # 1. BOTÓN MONITOR
     if text == BTN_MONITOR and user_id == ADMIN_ID:
+        asyncio.create_task(delete_msg(context, user_id, update.message.message_id))
         current = monitor_active.get(user_id, False)
         monitor_active[user_id] = not current
-        estado = "ACTIVADO" if monitor_active[user_id] else "DESACTIVADO"
-        msg = await update.message.reply_text(f"📡 Monitor: **{estado}**")
-        asyncio.create_task(delete_after_delay(context, user_id, msg.message_id, 3))
+        estado = "ON" if monitor_active[user_id] else "OFF"
+        msg = await update.message.reply_text(f"📡 Monitor: {estado}")
+        asyncio.create_task(delete_msg(context, user_id, msg.message_id, 3))
         return
 
-    # BOTÓN SALIR
+    # 2. BOTÓN SALIR (Siempre visible en sala)
     if text == BTN_SALIR:
+        asyncio.create_task(delete_msg(context, user_id, update.message.message_id))
         if user_id in user_to_room:
             room_name = user_to_room.pop(user_id)
             if room_name in rooms and user_id in rooms[room_name]["members"]:
@@ -51,38 +65,42 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             keyboard = [[BTN_ENTRAR]]
             if user_id == ADMIN_ID: keyboard.append([BTN_MONITOR])
-            reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-            msg = await update.message.reply_text("👋 Salida segura.", reply_markup=reply_markup)
-            asyncio.create_task(delete_after_delay(context, user_id, msg.message_id, 3))
+            reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, is_persistent=True)
+            msg = await update.message.reply_text("👋 Sesión cerrada.", reply_markup=reply_markup)
+            asyncio.create_task(delete_msg(context, user_id, msg.message_id, 3))
         return
 
-    # BOTÓN ENTRAR
+    # 3. BOTÓN ENTRAR
     if text == BTN_ENTRAR:
+        asyncio.create_task(delete_msg(context, user_id, update.message.message_id))
         waiting_for_key.add(user_id)
-        # Quitamos el teclado para que el usuario escriba la clave
-        await update.message.reply_text("Escriba la **Clave** de la sala:", reply_markup=ReplyKeyboardRemove())
+        msg = await update.message.reply_text("Escriba la **Clave**:", reply_markup=ReplyKeyboardRemove())
+        # Este mensaje de "Escriba la clave" se borra en 5s para no dejar rastro
+        asyncio.create_task(delete_msg(context, user_id, msg.message_id, 5))
         return
 
-    # LÓGICA DE CLAVE
+    # 4. LÓGICA DE INGRESO (Borra la clave enviada)
     if user_id in waiting_for_key:
         room_key = text
         waiting_for_key.remove(user_id)
+        # BORRAR LA CLAVE que el usuario escribió
+        asyncio.create_task(delete_msg(context, user_id, update.message.message_id))
         
         if room_key not in rooms:
             rooms[room_key] = {"members": [], "pending": []}
         
         room = rooms[room_key]
         if user_id not in room["members"] and len(room["members"]) >= 2:
-            await update.message.reply_text("🚫 Sala llena.")
+            msg = await update.message.reply_text("🚫 Sala llena.")
+            asyncio.create_task(delete_msg(context, user_id, msg.message_id, 3))
             return
 
         if user_id not in room["members"]: room["members"].append(user_id)
         user_to_room[user_id] = room_key
         
-        # MOSTRAR BOTÓN DE SALIDA
-        reply_markup = ReplyKeyboardMarkup([[BTN_SALIR]], resize_keyboard=True)
-        msg = await update.message.reply_text(f"✅ En sala: `{room_key}`", reply_markup=reply_markup)
-        asyncio.create_task(delete_after_delay(context, user_id, msg.message_id, 3))
+        reply_markup = ReplyKeyboardMarkup([[BTN_SALIR]], resize_keyboard=True, is_persistent=True)
+        msg = await update.message.reply_text(f"✅ Acceso concedido.", reply_markup=reply_markup)
+        asyncio.create_task(delete_msg(context, user_id, msg.message_id, 3))
 
         if room["pending"]:
             for item in list(room["pending"]):
@@ -90,14 +108,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await deliver_content(context, user_id, item, room_key)
         return
 
-    # MENSAJES DENTRO DE LA SALA
+    # 5. MENSAJES DE CHAT
     if user_id in user_to_room:
         await process_message(update, context)
+    else:
+        # Borrar cualquier texto aleatorio fuera de sala
+        asyncio.create_task(delete_msg(context, user_id, update.message.message_id, 1))
 
 async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.chat_id
     room_name = user_to_room[user_id]
     room = rooms[room_name]
+    
+    # Borrado inmediato del mensaje del emisor (2 segundos)
+    asyncio.create_task(delete_msg(context, user_id, update.message.message_id, 2))
     
     content_item = {"sender": user_id, "user_name": update.effective_user.first_name}
     if update.message.text:
@@ -108,52 +132,37 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         content_item.update({"type": "video", "content": update.message.video.file_id})
     else: return
 
-    # Borrado del mensaje que envió el usuario
-    asyncio.create_task(delete_after_delay(context, user_id, update.message.message_id, 2))
-    
-    # IMPORTANTE: Re-enviar el teclado de SALIR para que no se pierda
-    reply_markup = ReplyKeyboardMarkup([[BTN_SALIR]], resize_keyboard=True)
-    # Enviamos un mensaje invisible o pequeño que restaure el teclado
-    # Solo lo hacemos si el teclado desapareció por alguna razón
-    
     room["pending"].append(content_item)
 
     # Monitor
     if monitor_active.get(ADMIN_ID, False) and user_id != ADMIN_ID:
-        # Aquí te mando el contenido exacto para que puedas supervisar mejor
-        info = f"🕵️ **Monitor [{room_name}]:** {content_item['user_name']} dice: {content_item.get('content') if content_item['type'] == 'text' else 'Multimedia'}"
-        await context.bot.send_message(chat_id=ADMIN_ID, text=info)
+        await context.bot.send_message(chat_id=ADMIN_ID, text=f"🕵️ [{room_name}]: Nuevo mensaje.")
 
+    # Notificar a otros
     others = [m for m in room["members"] if m != user_id]
     for m_id in others:
-        n_msg = await context.bot.send_message(chat_id=m_id, text="🔔 Nuevo mensaje.")
-        asyncio.create_task(delete_after_delay(context, m_id, n_msg.message_id, 3))
+        n_msg = await context.bot.send_message(chat_id=m_id, text="🔔 Tienes un mensaje pendiente.")
+        asyncio.create_task(delete_msg(context, m_id, n_msg.message_id, 4))
 
 async def deliver_content(context, chat_id, item, room_name):
     msg_type, content = item["type"], item["content"]
-    sent = None
+    # Aseguramos que el botón de SALIR acompañe a cada mensaje entregado
+    markup = ReplyKeyboardMarkup([[BTN_SALIR]], resize_keyboard=True, is_persistent=True)
+    
     try:
-        # Al entregar el mensaje, incluimos el ReplyKeyboardMarkup para asegurar que el botón de salir esté ahí
-        reply_markup = ReplyKeyboardMarkup([[BTN_SALIR]], resize_keyboard=True)
-        
         if msg_type == "text":
-            sent = await context.bot.send_message(chat_id=chat_id, text=f"📩 **Mensaje:**\n{content}", reply_markup=reply_markup)
+            sent = await context.bot.send_message(chat_id=chat_id, text=f"📩:\n{content}", reply_markup=markup)
         elif msg_type == "photo":
-            sent = await context.bot.send_photo(chat_id=chat_id, photo=content, caption="📩 **Foto**", reply_markup=reply_markup)
+            sent = await context.bot.send_photo(chat_id=chat_id, photo=content, reply_markup=markup)
         elif msg_type == "video":
-            sent = await context.bot.send_video(chat_id=chat_id, video=content, caption="📩 **Video**", reply_markup=reply_markup)
+            sent = await context.bot.send_video(chat_id=chat_id, video=content, reply_markup=markup)
 
         if not (chat_id == ADMIN_ID and msg_type in ["photo", "video"]):
-            asyncio.create_task(delete_after_delay(context, chat_id, sent.message_id, 10))
+            asyncio.create_task(delete_msg(context, chat_id, sent.message_id, 10))
         
         if item["sender"] != chat_id:
             if item in rooms[room_name]["pending"]:
                 rooms[room_name]["pending"].remove(item)
-    except: pass
-
-async def delete_after_delay(context, chat_id, message_id, delay):
-    await asyncio.sleep(delay)
-    try: await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
     except: pass
 
 if __name__ == '__main__':
