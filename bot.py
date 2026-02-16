@@ -114,7 +114,7 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if m_id not in room["notifs"]: room["notifs"][m_id] = []
         room["notifs"][m_id].append(n_msg.message_id)
 
-async def deliver_content(context, chat_id, item):
+async def deliver_content(context, chat_id, item, room_name):
     msg_type, content = item["type"], item["content"]
     sent = None
     try:
@@ -125,12 +125,17 @@ async def deliver_content(context, chat_id, item):
         elif msg_type == "video":
             sent = await context.bot.send_video(chat_id=chat_id, video=content, caption="📩 **Video**")
 
-        # Borrado del receptor (10 segundos)
-        is_multimedia = msg_type in ["photo", "video"]
-        if not (chat_id == ADMIN_ID and is_multimedia):
+        # 1. Programar borrado en el chat de Telegram (10 segundos)
+        if not (chat_id == ADMIN_ID and msg_type in ["photo", "video"]):
             asyncio.create_task(delete_after_delay(context, chat_id, sent.message_id, 10))
+            
+        # 2. ELIMINAR DE LA MEMORIA DEL BOT
+        # Al terminar esta función, el mensaje ya fue entregado y se elimina de la lista 'pending'
+        if item in rooms[room_name]["pending"]:
+            rooms[room_name]["pending"].remove(item)
+            
     except Exception as e:
-        logging.error(f"Error: {e}")
+        logging.error(f"Error en entrega: {e}")
 
 async def delete_after_delay(context, chat_id, message_id, delay):
     await asyncio.sleep(delay)
