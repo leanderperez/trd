@@ -1,97 +1,100 @@
 import asyncio
 import logging
-from telegram import Update
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 
 # --- CONFIGURACIÓN ---
-TOKEN = '8520487605:AAFEUVvDIT5nI_iqpypXX_gpRhlO191mqyU'
-ADMIN_ID = 610413875  # <--- REEMPLAZA CON TU ID DE TELEGRAM
+TOKEN = 'TU_TOKEN_AQUI'
+ADMIN_ID = 610413875 
 # ---------------------
 
-# Estructura en RAM
-rooms = {} # "nombre": {"pass": "x", "members": [id1, id2], "pending": [], "notifs": {id: [msg_ids]}}
+rooms = {} 
 user_to_room = {}
+waiting_for_key = set()
 
 logging.basicConfig(level=logging.INFO)
 
+# Teclados predefinidos
+START_KEYBOARD = [['🔑 Entrar a Sala']]
+IN_ROOM_KEYBOARD = [['🚪 Salir de la Sala']]
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔐 **Pasarela Secreta Pro**\nUsa `/join sala clave` para entrar.")
+    reply_markup = ReplyKeyboardMarkup(START_KEYBOARD, resize_keyboard=True)
+    await update.message.reply_text(
+        "🔐 **Bienvenido a la Pasarela Secreta**\nPulse el botón para acceder.",
+        reply_markup=reply_markup
+    )
 
-async def join(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.chat_id
-    try:
-        room_name, password = context.args[0], context.args[1]
-    except:
-        await update.message.reply_text("Uso: /join <sala> <clave>")
+    text = update.message.text
+
+    # BOTÓN: SALIR DE LA SALA
+    if text == "🚪 Salir de la Sala":
+        if user_id in user_to_room:
+            room_name = user_to_room.pop(user_id)
+            # (Opcional) Podrías eliminarlo de room["members"] si quieres que la sala quede libre
+            if room_name in rooms and user_id in rooms[room_name]["members"]:
+                rooms[room_name]["members"].remove(user_id)
+            
+            reply_markup = ReplyKeyboardMarkup(START_KEYBOARD, resize_keyboard=True)
+            await update.message.reply_text("👋 Has salido de la sala de forma segura.", reply_markup=reply_markup)
         return
 
-    if room_name not in rooms:
-        rooms[room_name] = {"password": password, "members": [], "pending": [], "notifs": {}}
-
-    room = rooms[room_name]
-
-    # 1. Validar Contraseña
-    if room["password"] != password:
-        await update.message.reply_text("❌ Clave incorrecta.")
+    # BOTÓN: ENTRAR A SALA
+    if text == "🔑 Entrar a Sala":
+        waiting_for_key.add(user_id)
+        await update.message.reply_text("Escriba la **Clave de la Sala**:", reply_markup=ReplyKeyboardRemove())
         return
 
-    # 2. Validar Límite de 2 usuarios
-    if user_id not in room["members"] and len(room["members"]) >= 2:
-        await update.message.reply_text("🚫 Esta sala está llena (máximo 2 personas).")
+    # LÓGICA DE INGRESO POR CLAVE
+    if user_id in waiting_for_key:
+        room_key = text
+        waiting_for_key.remove(user_id)
+        
+        if room_key not in rooms:
+            rooms[room_key] = {"members": [], "pending": [], "notifs": {}}
+        
+        room = rooms[room_key]
+
+        if user_id not in room["members"] and len(room["members"]) >= 2:
+            reply_markup = ReplyKeyboardMarkup(START_KEYBOARD, resize_keyboard=True)
+            await update.message.reply_text("🚫 Sala llena.", reply_markup=reply_markup)
+            return
+
+        if user_id not in room["members"]:
+            room["members"].append(user_id)
+            room["notifs"][user_id] = []
+        
+        user_to_room[user_id] = room_key
+        
+        # Mostrar botón de salir al entrar con éxito
+        reply_markup = ReplyKeyboardMarkup(IN_ROOM_KEYBOARD, resize_keyboard=True)
+        await update.message.reply_text(
+            f"✅ Conectado a: `{room_key}`\nLos mensajes que envíes se borrarán en 2s.\nLos que recibas, en 10s.",
+            reply_markup=reply_markup
+        )
+
+        if room["pending"]:
+            for item in list(room["pending"]):
+                if item["sender"] != user_id:
+                    await deliver_content(context, user_id, item)
+            room["pending"] = [i for i in room["pending"] if i["sender"] == user_id]
         return
 
-    # 3. Entrar a la sala
-    if user_id not in room["members"]:
-        room["members"].append(user_id)
-        room["notifs"][user_id] = []
-    
-    user_to_room[user_id] = room_name
-    await update.message.reply_text(f"✅ Has entrado a '{room_name}'.")
+    # MENSAJES DENTRO DE LA SALA
+    if user_id in user_to_room:
+        await process_message(update, context)
+    else:
+        await update.message.reply_text("⚠️ Use el menú para comenzar.")
 
-    # 4. Limpiar notificaciones previas de "Tienes un mensaje"
-    if user_id in room["notifs"]:
-        for m_id in room["notifs"][user_id]:
-            try: await context.bot.delete_message(chat_id=user_id, message_id=m_id)
-            except: pass
-        room["notifs"][user_id] = []
-
-    # 5. Entregar mensajes/media pendientes
-    if room["pending"]:
-        for item in room["pending"]:
-            if item["sender"] != user_id:
-                await deliver_content(context, user_id, item)
-        # Limpiar pendientes una vez entregados
-        room["pending"] = [i for i in room["pending"] if i["sender"] == user_id]
-
-async def deliver_content(context, chat_id, item):
-    """Entrega contenido y programa borrado si no es el ADMIN"""
-    msg_type = item["type"]
-    content = item["content"]
-    caption = "📩 **Mensaje Secreto**"
-    
-    sent = None
-    if msg_type == "text":
-        sent = await context.bot.send_message(chat_id=chat_id, text=f"{caption}\n{content}")
-    elif msg_type == "photo":
-        sent = await context.bot.send_photo(chat_id=chat_id, photo=content, caption=caption)
-    elif msg_type == "video":
-        sent = await context.bot.send_video(chat_id=chat_id, video=content, caption=caption)
-
-    # Si el receptor NO es el Admin, borrar a los 20s
-    if chat_id != ADMIN_ID:
-        asyncio.create_task(delete_after_delay(context, chat_id, sent.message_id, 20))
-
-async def handle_incoming(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.chat_id
-    if user_id not in user_to_room:
-        await update.message.reply_text("⚠️ Únete a una sala primero.")
-        return
-
     room_name = user_to_room[user_id]
     room = rooms[room_name]
     
-    # Identificar tipo de contenido
     content_item = {"sender": user_id}
+    
     if update.message.text:
         content_item.update({"type": "text", "content": update.message.text})
     elif update.message.photo:
@@ -99,19 +102,35 @@ async def handle_incoming(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif update.message.video:
         content_item.update({"type": "video", "content": update.message.video.file_id})
     else:
-        return # Otros tipos no soportados
+        return
 
-    # Borrar mensaje original del emisor
-    await update.message.delete()
-
-    # Guardar en pendientes
+    # Borrado del emisor (2 segundos)
+    asyncio.create_task(delete_after_delay(context, user_id, update.message.message_id, 2))
     room["pending"].append(content_item)
 
-    # Notificar a otros miembros
     others = [m for m in room["members"] if m != user_id]
     for m_id in others:
-        n_msg = await context.bot.send_message(chat_id=m_id, text=f"🔔 Nuevo mensaje en '{room_name}'. Entra para verlo.")
+        n_msg = await context.bot.send_message(chat_id=m_id, text=f"🔔 Nuevo mensaje en la sala.")
+        if m_id not in room["notifs"]: room["notifs"][m_id] = []
         room["notifs"][m_id].append(n_msg.message_id)
+
+async def deliver_content(context, chat_id, item):
+    msg_type, content = item["type"], item["content"]
+    sent = None
+    try:
+        if msg_type == "text":
+            sent = await context.bot.send_message(chat_id=chat_id, text=f"📩 **Mensaje:**\n{content}")
+        elif msg_type == "photo":
+            sent = await context.bot.send_photo(chat_id=chat_id, photo=content, caption="📩 **Foto**")
+        elif msg_type == "video":
+            sent = await context.bot.send_video(chat_id=chat_id, video=content, caption="📩 **Video**")
+
+        # Borrado del receptor (10 segundos)
+        is_multimedia = msg_type in ["photo", "video"]
+        if not (chat_id == ADMIN_ID and is_multimedia):
+            asyncio.create_task(delete_after_delay(context, chat_id, sent.message_id, 10))
+    except Exception as e:
+        logging.error(f"Error: {e}")
 
 async def delete_after_delay(context, chat_id, message_id, delay):
     await asyncio.sleep(delay)
@@ -121,6 +140,6 @@ async def delete_after_delay(context, chat_id, message_id, delay):
 if __name__ == '__main__':
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler('start', start))
-    app.add_handler(CommandHandler('join', join))
-    app.add_handler(MessageHandler((filters.TEXT | filters.PHOTO | filters.VIDEO) & (~filters.COMMAND), handle_incoming))
+    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
+    app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, process_message))
     app.run_polling()
