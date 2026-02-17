@@ -19,7 +19,7 @@ logging.basicConfig(level=logging.INFO)
 BTN_ENTRAR = '🔑 Entrar a Sala'
 BTN_SALIR = '🚪 Salir de la Sala'
 BTN_MONITOR = '📡 Monitor: ON/OFF'
-BTN_LIMPIAR_SALA = '🧹 Limpiar Sala' # Nuevo botón para el teclado físico
+BTN_LIMPIAR_SALA = '🧹 Limpiar Sala'
 
 async def delete_msg(context, chat_id, message_id, delay=0):
     if delay > 0: await asyncio.sleep(delay)
@@ -50,17 +50,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"📡 Monitor: {estado}")
         
         if is_now_active:
-            # Mostrar salas creadas en OFF
             if offline_rooms_log:
                 reporte = "📂 **Salas creadas en OFF:**\n" + "\n".join([f"• `{r}`" for r in offline_rooms_log])
                 await context.bot.send_message(chat_id=ADMIN_ID, text=reporte)
                 offline_rooms_log.clear()
-
-            # Mostrar salas con mensajes pendientes
             await mostrar_menu_gestion(update, context)
         return
 
-    # --- BOTÓN LIMPIAR (Dentro de sala modo Fantasma) ---
+    # --- BOTÓN LIMPIAR ---
     if text == BTN_LIMPIAR_SALA and user_id == ADMIN_ID and monitor_active.get(user_id):
         asyncio.create_task(delete_msg(context, user_id, update.message.message_id))
         room_name = user_to_room.get(user_id)
@@ -116,13 +113,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if user_id not in room["members"]: room["members"].append(user_id)
 
         user_to_room[user_id] = room_key
-        
-        # Teclado dinámico: Si es fantasma, agregamos el botón de limpiar
         kb_sala = [[BTN_SALIR]]
         if is_ghost: kb_sala[0].append(BTN_LIMPIAR_SALA)
         
         markup = ReplyKeyboardMarkup(kb_sala, resize_keyboard=True, is_persistent=True)
-        await update.message.reply_text("👻 Fantasma" if is_ghost else "🔓 Conectado", reply_markup=markup)
+        await update.message.reply_text("😈 Fantasma" if is_ghost else "🔓 Conectado", reply_markup=markup)
 
         for item in list(room["pending"]):
             if is_ghost or item["sender"] != user_id:
@@ -137,12 +132,11 @@ async def mostrar_menu_gestion(update: Update, context: ContextTypes.DEFAULT_TYP
     if salas_activas:
         keyboard = []
         for s in salas_activas:
-            # Botones inline para facilitar el acceso rápido
             keyboard.append([InlineKeyboardButton(f"👁 Espiar Sala: {s}", callback_query_data=f"view_{s}")])
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await context.bot.send_message(chat_id=ADMIN_ID, text="🛠 **Salas con actividad pendiente:**", reply_markup=reply_markup)
+        await context.bot.send_message(chat_id=ADMIN_ID, text="🛠 **Salas con mensajes pendientes:**", reply_markup=reply_markup)
     else:
-        await context.bot.send_message(chat_id=ADMIN_ID, text="✅ No hay mensajes acumulados en ninguna sala.")
+        await context.bot.send_message(chat_id=ADMIN_ID, text="✅ No hay mensajes acumulados.")
 
 async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -153,11 +147,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("view_"):
         room_name = data.replace("view_", "")
         user_to_room[user_id] = room_name
-        
-        # Al entrar por el botón, ya te damos el teclado con SALIR y LIMPIAR
         markup = ReplyKeyboardMarkup([[BTN_SALIR, BTN_LIMPIAR_SALA]], resize_keyboard=True, is_persistent=True)
         await context.bot.send_message(chat_id=user_id, text=f"🕵️ Entrando a `{room_name}`...", reply_markup=markup)
-        
         room = rooms[room_name]
         for item in list(room["pending"]):
             await deliver_content(context, user_id, item, room_name, is_ghost=True)
@@ -168,7 +159,8 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     room = rooms[room_name]
     is_ghost = (user_id == ADMIN_ID and monitor_active.get(ADMIN_ID, False))
     
-    asyncio.create_task(delete_msg(context, user_id, update.message.message_id, 2))
+    # --- BORRADO EMISOR: 3 segundos ---
+    asyncio.create_task(delete_msg(context, user_id, update.message.message_id, 3))
     
     if is_ghost:
         msg = await update.message.reply_text("⚠️ Solo lectura en modo fantasma.")
@@ -176,14 +168,20 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     content_item = {"sender": user_id}
-    if update.message.text: content_item.update({"type": "text", "content": update.message.text})
-    elif update.message.photo: content_item.update({"type": "photo", "content": update.message.photo[-1].file_id})
-    elif update.message.video: content_item.update({"type": "video", "content": update.message.video.file_id})
+    if update.message.text: 
+        content_item.update({"type": "text", "content": update.message.text, "len": len(update.message.text)})
+    elif update.message.photo: 
+        content_item.update({"type": "photo", "content": update.message.photo[-1].file_id, "len": 999})
+    elif update.message.video: 
+        content_item.update({"type": "video", "content": update.message.video.file_id, "len": 999})
     else: return
 
+    # --- NOTIFICACIÓN INTELIGENTE PARA ADMIN ---
     if user_id != ADMIN_ID:
-        msg_alert = f"🕵️ Actividad en: `{room_name}`" if monitor_active.get(ADMIN_ID, False) else "🔔 Actividad en sistema."
-        await context.bot.send_message(chat_id=ADMIN_ID, text=msg_alert)
+        # Solo notifica si el Admin NO está actualmente en esa misma sala
+        if user_to_room.get(ADMIN_ID) != room_name:
+            msg_alert = f"🕵️ Actividad en: `{room_name}`" if monitor_active.get(ADMIN_ID, False) else "🔔 Actividad en sistema."
+            await context.bot.send_message(chat_id=ADMIN_ID, text=msg_alert)
 
     others = [m for m in room["members"] if m != user_id]
     if not others:
@@ -194,6 +192,7 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await deliver_content(context, m_id, content_item, room_name, is_ghost=False)
             else:
                 room["pending"].append(content_item)
+                # Notificación para usuario normal fuera de sala
                 n_msg = await context.bot.send_message(chat_id=m_id, text="📩 Nuevo mensaje pendiente.")
                 asyncio.create_task(delete_msg(context, m_id, n_msg.message_id, 5))
 
@@ -207,8 +206,12 @@ async def deliver_content(context, chat_id, item, room_name, is_ghost=False):
         elif msg_type == "video":
             sent = await context.bot.send_video(chat_id=chat_id, video=content)
 
+        # --- BORRADO RECEPTOR INTELIGENTE ---
         if not is_ghost:
-            asyncio.create_task(delete_msg(context, chat_id, sent.message_id, 5))
+            # 7s si texto corto (<100), 10s si es largo o multimedia
+            delay = 7 if item.get("len", 0) < 100 else 10
+            asyncio.create_task(delete_msg(context, chat_id, sent.message_id, delay))
+            
             if item in rooms[room_name].get("pending", []):
                 rooms[room_name]["pending"].remove(item)
     except: pass
